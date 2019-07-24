@@ -83,10 +83,10 @@ class SignatureGenerator(object):
         self.__init__(data)
 
     def get_taskhashes(self):
-        return self.taskhash
+        return self.taskhash, self.unitaskhashes
 
     def set_taskhashes(self, hashes):
-        self.taskhash = hashes
+        self.taskhash, self.unitaskhashes = hashes
 
     def save_unitaskhashes(self):
         return

@@ -2015,7 +2015,7 @@ class RunQueueExecute:
             if self.can_start_task():
                 return True
 
-        if not self.sq_live and not self.sqdone and not self.sq_deferred and not self.changed_setscene:
+        if not self.sq_live and not self.sqdone and not self.sq_deferred and not self.changed_setscene and not self.holdoff_tasks:
             logger.info("Setscene tasks completed")
             logger.debug(1, 'We could skip tasks %s', "\n".join(sorted(self.scenequeue_covered)))
 
@@ -2212,8 +2212,8 @@ class RunQueueExecute:
                     origuni = self.rqdata.runtaskentries[tid].unihash
                     self.rqdata.runtaskentries[tid].unihash = bb.parse.siggen.get_unihash(taskfn + "." + taskname)
                     logger.debug(1, "Task %s hash changes: %s->%s %s->%s" % (tid, orighash, self.rqdata.runtaskentries[tid].hash, origuni, self.rqdata.runtaskentries[tid].unihash))
-                    if str(origuni) == str(self.rqdata.runtaskentries[tid].unihash):
-                        bb.warn("Odd, has didn't change for %s?" % tid)
+#                    if str(origuni) == str(self.rqdata.runtaskentries[tid].unihash):
+#                        bb.warn("Odd, has didn't change for %s?" % tid)
                     next |= self.rqdata.runtaskentries[tid].revdeps
                     changed.add(tid)
                     total.remove(tid)
@@ -2239,16 +2239,25 @@ class RunQueueExecute:
             self.update_holdofftasks()
 
     def update_holdofftasks(self):
-        self.holdoff_tasks = set()
-        for tid in self.changed_setscene.copy():
+        self.holdoff_tasks = set(self.changed_setscene)
+
+        for tid in self.rqdata.runq_setscene_tids:
+            if tid not in self.scenequeue_covered and tid not in self.scenequeue_notcovered:
+                self.holdoff_tasks.add(tid)
+
+        for tid in self.holdoff_tasks.copy():
             for dep in self.sqdata.sq_covered_tasks[tid]:
                 if dep not in self.runq_complete:
                     self.holdoff_tasks.add(dep)
-        logger.debug(2, "Holding off tasks %s" % str(self.holdoff_tasks))
+        logger.debug(2, "Holding off tasks %s" % pprint.pformat(self.holdoff_tasks))
 
     def process_possible_migrations(self):
         changes = False
         for tid in self.changed_setscene.copy():
+            if tid in self.runq_running:
+                self.changed_setscene.remove(tid)
+                continue
+
             valid = True
             # Check no tasks this covers are running
             for dep in self.sqdata.sq_covered_tasks[tid]:
@@ -2260,9 +2269,6 @@ class RunQueueExecute:
                 continue
 
             for dep in self.sqdata.sq_covered_tasks[tid]:
-                if dep in self.runq_buildable and dep not in self.runq_complete:
-                    self.runq_buildable.remove(dep)
-                    self.sched.removebuildable(dep)
                 if dep not in self.runq_complete:
                     if dep in self.tasks_scenequeue_done:
                         self.tasks_scenequeue_done.remove(dep)
@@ -2277,8 +2283,10 @@ class RunQueueExecute:
                 if tid not in self.sq_buildable:
                     self.sq_buildable.add(tid)
 
-            self.sqdata.outrightfail.remove(tid)
-            self.scenequeue_notcovered.remove(tid)
+            if tid in self.sqdata.outrightfail:
+                self.sqdata.outrightfail.remove(tid)
+            if tid in self.scenequeue_notcovered:
+                self.scenequeue_notcovered.remove(tid)
 
             (mc, fn, taskname, taskfn) = split_tid_mcfn(tid)
             self.sqdata.stamps[tid] = bb.build.stampfile(taskname + "_setscene", self.rqdata.dataCaches[mc], taskfn, noextra=True)
@@ -2321,7 +2329,7 @@ class RunQueueExecute:
                 for deptask in self.rqdata.runtaskentries[t].revdeps:
                     if deptask in ready or deptask in new or deptask in self.tasks_scenequeue_done or deptask in self.rqdata.runq_setscene_tids:
                         continue
-                    if self.rqdata.runtaskentries[deptask].depends.issubset(self.tasks_scenequeue_done):
+                    if deptask in self.sqdata.unskippable:
                         new.add(deptask)
                         self.tasks_scenequeue_done.add(deptask)
                         self.tasks_notcovered.add(deptask)
@@ -2383,6 +2391,7 @@ class RunQueueExecute:
                 for tid in covered:
                     if self.rqdata.runtaskentries[tid].depends.issubset(self.runq_complete):
                         self.setbuildable(tid)
+        self.update_holdofftasks()
 
     def sq_task_completeoutright(self, task):
         """
@@ -2581,8 +2590,8 @@ def build_scenequeue_data(sqdata, rqdata, rq, cooker, stampcache, sqrq):
 
     rqdata.init_progress_reporter.next_stage()
 
-    # Build a list of setscene tasks which are "unskippable"
-    # These are direct endpoints referenced by the build
+    # Build a list of tasks which are "unskippable"
+    # These are direct endpoints referenced by the build upto and including setscene tasks
     # Take the build endpoints (no revdeps) and find the sstate tasks they depend upon
     new = True
     for tid in rqdata.runtaskentries:
@@ -2590,10 +2599,10 @@ def build_scenequeue_data(sqdata, rqdata, rq, cooker, stampcache, sqrq):
             sqdata.unskippable.add(tid)
     while new:
         new = False
-        for tid in sqdata.unskippable.copy():
+        orig = sqdata.unskippable.copy()
+        for tid in orig:
             if tid in rqdata.runq_setscene_tids:
                 continue
-            sqdata.unskippable.remove(tid)
             if len(rqdata.runtaskentries[tid].depends) == 0:
                 # These are tasks which have no setscene tasks in their chain, need to mark as directly buildable
                 sqrq.tasks_notcovered.add(tid)
@@ -2601,7 +2610,8 @@ def build_scenequeue_data(sqdata, rqdata, rq, cooker, stampcache, sqrq):
                 sqrq.setbuildable(tid)
                 sqrq.scenequeue_process_unskippable(tid)
             sqdata.unskippable |= rqdata.runtaskentries[tid].depends
-            new = True
+            if sqdata.unskippable != orig:
+                new = True
 
     rqdata.init_progress_reporter.next_stage(len(rqdata.runtaskentries))
 

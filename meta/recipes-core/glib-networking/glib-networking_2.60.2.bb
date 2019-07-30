@@ -30,3 +30,13 @@ FILES_${PN} += "\
                 "
 FILES_${PN}-dev += "${libdir}/gio/modules/libgio*.la"
 FILES_${PN}-staticdev += "${libdir}/gio/modules/libgio*.a"
+
+# meson lacks support for --disable-nls.
+disable_nls() {
+    sed -i "/subdir('po')/d" ${S}/meson.build
+}
+
+do_unpack_append() {
+    if d.getVar('USE_NLS') == 'no':
+        bb.build.exec_func('disable_nls', d)
+}
